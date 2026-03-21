@@ -224,15 +224,14 @@ def compute_brain():
 
 def full_cycle():
     idx = SYS.get("index", "NIFTY")
-    # Try Dhan backend first (most reliable on Render)
-    ok = fetch_dhan_oi(idx)
+    # NSE Option Chain — FREE, no token needed!
+    ok = fetch_nse_oi_direct(idx)
     if not ok:
-        # Try NSE direct
-        ok = fetch_nse_oi(idx)
+        ok = fetch_nse_oi(idx)   # alternate NSE method
     # Always get VIX + GIFT from Yahoo
     threading.Thread(target=fetch_yahoo, daemon=True).start()
     if not ok:
-        with LOCK: SYS["error"] = "OI fetch failed — retrying"
+        with LOCK: SYS["error"] = "NSE fetch failed — retrying next cycle"
     compute_brain()
 
 def poll_loop():
@@ -605,7 +604,8 @@ async function doFetch(){
 
 async function runClaude(){
   const key=getKey();
-  if(!key||!D.spot){ alert('API key or data missing'); return; }
+  if(!key){ alert('CLAUDE AI KEY box\u00e0\u00ae\u00b2\u00e0\u00af\u008d sk-ant-... paste \u00e0\u00ae\u00aa\u00e0\u00ae\u00a3\u00e0\u00af\u008d\u00e0\u00ae\u00a3\u00e0\u00af\u008d\u00e0\u00ae\u0095!'); return; }
+  if(!D.spot){ alert('REFRESH NOW press \u00e0\u00ae\u00aa\u00e0\u00ae\u00a3\u00e0\u00af\u008d\u00e0\u00ae\u00a3\u00e0\u00af\u008d\u00e0\u00ae\u0095!'); return; }
   const btn=q('go-btn'); btn.disabled=true; btn.innerHTML='<span class="sp"></span>Computing...';
   q('claude-box').style.display='block';
   q('claude-text').innerHTML='<span style="color:var(--gold)">Analysing...</span>';
@@ -741,10 +741,23 @@ def do_fetch():
     return jsonify({"ok": True})
 
 # ── STARTUP ──────────────────────────────────────────────────────────
+def wake_dhan():
+    try:
+        print("[WAKE] Pinging Dhan backend...")
+        requests.get("https://mathan-backend.onrender.com/", timeout=35)
+        print("[WAKE] Dhan backend awake!")
+    except Exception as e:
+        print(f"[WAKE ERR] {e}")
+
 if __name__ == "__main__":
     print(f"[START] MATHAN AI — Port {PORT}")
-    # Initial data fetch
-    threading.Thread(target=full_cycle, daemon=True).start()
+    # Wake Dhan backend first
+    threading.Thread(target=wake_dhan, daemon=True).start()
+    # Initial data fetch after delay
+    def delayed_start():
+        time.sleep(8)
+        full_cycle()
+    threading.Thread(target=delayed_start, daemon=True).start()
     # Background polling
     threading.Thread(target=poll_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT, use_reloader=False, threaded=True)
