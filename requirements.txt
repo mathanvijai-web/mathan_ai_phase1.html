@@ -1,7 +1,7 @@
 flask==3.0.3
 flask-sock==0.7.0
 simple-websocket==1.1.0
-smartapi-python==1.4.2
+smartapi-python==1.5.5
 pyotp==2.9.0
 requests==2.32.3
 websocket-client==1.8.0
