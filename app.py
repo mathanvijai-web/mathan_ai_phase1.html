@@ -224,12 +224,15 @@ def compute_brain():
 
 def full_cycle():
     idx = SYS.get("index", "NIFTY")
-    # Try NSE OI first
-    nse_ok = fetch_nse_oi(idx)
+    # Try Dhan backend first (most reliable on Render)
+    ok = fetch_dhan_oi(idx)
+    if not ok:
+        # Try NSE direct
+        ok = fetch_nse_oi(idx)
     # Always get VIX + GIFT from Yahoo
     threading.Thread(target=fetch_yahoo, daemon=True).start()
-    if not nse_ok:
-        with LOCK: SYS["error"] = "NSE OI failed — using Yahoo"
+    if not ok:
+        with LOCK: SYS["error"] = "OI fetch failed — retrying"
     compute_brain()
 
 def poll_loop():
