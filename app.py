@@ -460,154 +460,101 @@ body::before{content:'';position:fixed;inset:0;
 </div>
 
 <script>
-const WS_URL = location.origin.replace(/^http/,'ws') + '/ws';
-
-// ── ZERO FAILURE WEBSOCKET ──────────────────────────────────────────
-let ws        = null;
-let ok        = false;
-let rcDelay   = 1000;       // start at 1s, max 10s
-let rcTmr     = null;
-let hbTmr     = null;       // heartbeat interval
-let wdTmr     = null;       // watchdog interval
-let hbMissed  = 0;          // consecutive missed pongs
-let connecting = false;     // prevent duplicate connections
-let autoOn    = true;
+// ── HTTP POLLING (Render-compatible, no WebSocket needed) ──────────
+let autoOn = true;
 let srvM={}, srvAg={}, srvBr={}, srvSys={};
+let pollTimer = null;
+let ok = false;
 
-function setOnline() {
-  ok=true; hbMissed=0; rcDelay=1000; connecting=false;
+function setOnline(){
+  ok=true;
   q('wsdot').className='wsdot on';
   q('live-badge').className='hlive on'; q('live-badge').textContent='LIVE';
-  wst('Connected');
+  wst('Connected ✓');
 }
-
-function setOffline(reason) {
+function setOffline(reason){
   ok=false;
   q('wsdot').className='wsdot';
   q('live-badge').className='hlive off'; q('live-badge').textContent='OFFLINE';
-  wst(reason||'Offline — reconnecting...');
+  wst(reason||'Connecting...');
 }
 
-function stopTimers() {
-  clearInterval(hbTmr); hbTmr=null;
-  clearInterval(wdTmr); wdTmr=null;
-  clearTimeout(rcTmr);  rcTmr=null;
-}
-
-function safeClose() {
-  if(!ws) return;
-  try {
-    ws.onopen=null; ws.onmessage=null;
-    ws.onerror=null; ws.onclose=null;
-    if(ws.readyState===WebSocket.OPEN||ws.readyState===WebSocket.CONNECTING)
-      ws.close();
-  } catch(e){}
-  ws=null;
-}
-
-function schedRC() {
-  if(rcTmr) return;                         // already scheduled
-  setOffline('Reconnecting in '+Math.round(rcDelay/1000)+'s...');
-  rcTmr = setTimeout(()=>{
-    rcTmr=null;
-    connect();
-    rcDelay = Math.min(rcDelay*2, 10000);   // exp backoff, max 10s
-  }, rcDelay);
-}
-
-function startHeartbeat() {
-  stopTimers();
-  hbMissed = 0;
-
-  // Ping every 3s
-  hbTmr = setInterval(()=>{
-    if(!ws || ws.readyState!==WebSocket.OPEN) {
-      stopTimers(); schedRC(); return;
-    }
-    ws.send(JSON.stringify({type:'ping'}));
-    hbMissed++;
-    if(hbMissed>=3) {
-      // 3 missed pongs = dead connection
-      console.warn('[WS] Heartbeat timeout — forcing reconnect');
-      stopTimers(); safeClose(); schedRC();
-    }
-  }, 3000);
-
-  // Watchdog: check readyState every 5s independently
-  wdTmr = setInterval(()=>{
-    if(!ws || ws.readyState!==WebSocket.OPEN) {
-      stopTimers(); safeClose(); schedRC();
-    }
-  }, 5000);
-}
-
-function connect() {
-  if(connecting) return;                    // prevent duplicate
-  if(ws && ws.readyState===WebSocket.OPEN) return;  // already open
-  connecting=true;
-  safeClose();
-  wst('Connecting...');
-
-  try {
-    ws = new WebSocket(WS_URL);
-  } catch(e) {
-    connecting=false; schedRC(); return;
-  }
-
-  // Timeout: if not open in 8s, retry
-  const openTimeout = setTimeout(()=>{
-    if(!ws || ws.readyState!==WebSocket.OPEN){
-      connecting=false; safeClose(); schedRC();
-    }
-  }, 8000);
-
-  ws.onopen = () => {
-    clearTimeout(openTimeout);
+async function poll(){
+  try{
+    const r = await fetch('/status', {signal: AbortSignal.timeout(8000)});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const j = await r.json();
     setOnline();
-    startHeartbeat();
-    // Request fresh state on reconnect
-    try { ws.send(JSON.stringify({type:'get_state'})); } catch(e){}
-  };
-
-  ws.onmessage = (e) => {
-    hbMissed = 0;  // reset on any message — connection is alive
-    let m; try{m=JSON.parse(e.data);}catch{return;}
-    handle(m);
-  };
-
-  ws.onerror = (e) => {
-    clearTimeout(openTimeout);
-    connecting=false;
-    stopTimers(); safeClose(); schedRC();
-  };
-
-  ws.onclose = (e) => {
-    clearTimeout(openTimeout);
-    connecting=false;
-    stopTimers();
-    setOffline('Disconnected ('+e.code+')');
-    schedRC();
-  };
+    // Map /status response to render()
+    srvSys = j.sys||{};
+    srvM   = j.market||{};
+    srvAg  = {};
+    srvBr  = j.brain||{};
+    // agents not in /status — fetch separately
+    render();
+  }catch(e){
+    setOffline('Retrying...');
+  }
 }
 
-function wsSend(o) {
-  if(ws && ws.readyState===1){
-    ws.send(JSON.stringify(o));
-    return;
+async function fullPoll(){
+  try{
+    const r = await fetch('/state', {signal: AbortSignal.timeout(8000)});
+    if(!r.ok){ poll(); return; }
+    const j = await r.json();
+    setOnline();
+    if(j.sys)    srvSys = j.sys;
+    if(j.market) srvM   = j.market;
+    if(j.agents) srvAg  = j.agents;
+    if(j.brain)  srvBr  = j.brain;
+    render();
+  }catch(e){
+    poll();
   }
-  // WS not ready — use REST fallback for critical actions
+}
+
+function startPolling(){
+  fullPoll();
+  pollTimer = setInterval(fullPoll, 5000);
+}
+
+function connect(){ startPolling(); }
+
+function wsSend(o){
+  // All actions via REST — no WebSocket needed!
   if(o.type==='connect_angel'){
-    fetch('/connect_angel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)})
+    fetch('/connect_angel',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(o)})
       .then(r=>r.json()).then(j=>{
-        if(j.ok) showStatus('Login started — watch for [ANGEL] in server logs');
-        else showStatus('Error: '+j.error);
-      }).catch(e=>showStatus('Network error: '+e));
+        if(j.ok) showStatus('Angel One connecting... wait 15s');
+        else showStatus('Error: '+(j.error||'Failed'));
+      }).catch(e=>showStatus('Network error'));
     return;
   }
   if(o.type==='set_yahoo'){
-    fetch('/set_yahoo',{method:'POST'}).then(()=>sdot('wait','Yahoo connecting...')).catch(()=>{});
+    fetch('/set_yahoo',{method:'POST'})
+      .then(()=>{ showStatus('Yahoo mode active!'); fullPoll(); })
+      .catch(()=>{});
     return;
   }
+  if(o.type==='set_index'){
+    fetch('/set_index',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({index:o.index})})
+      .then(()=>fullPoll()).catch(()=>{});
+    return;
+  }
+  if(o.type==='fetch'){
+    fetch('/do_fetch',{method:'POST'})
+      .then(()=>setTimeout(fullPoll,2000)).catch(()=>{});
+    return;
+  }
+  if(o.type==='ping'){ return; }
+  // Generic fallback
+  fetch('/action',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(o)}).catch(()=>{});
 }
 
 function handle(m) {
@@ -1826,6 +1773,33 @@ def status():
 def oc_debug():
     with OC_LOCK:
         return jsonify({"oc_data": dict(OC_DATA), "count": len(OC_DATA)})
+
+@app.route("/state")
+def state_api():
+    """Full state for HTTP polling clients."""
+    return jsonify(build_state())
+
+@app.route("/set_index", methods=["POST"])
+def set_index_rest():
+    idx = (request.get_json(force=True) or {}).get("index","NIFTY").upper()
+    if idx in INDEX_CFG:
+        with state_lock: SYS["index"] = idx
+        db_set("index", idx)
+        threading.Thread(target=full_cycle, daemon=True).start()
+    return jsonify({"ok": True, "index": idx})
+
+@app.route("/do_fetch", methods=["POST"])
+def do_fetch_rest():
+    threading.Thread(target=full_cycle, daemon=True).start()
+    return jsonify({"ok": True})
+
+@app.route("/action", methods=["POST"])
+def action_rest():
+    d = request.get_json(force=True) or {}
+    t = d.get("type","")
+    if t == "set_auto":
+        with state_lock: SYS["auto"] = bool(d.get("on", True))
+    return jsonify({"ok": True})
 
 @app.route("/")
 @app.route("/dashboard")
