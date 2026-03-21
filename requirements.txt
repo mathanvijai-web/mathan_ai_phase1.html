@@ -7,3 +7,4 @@ python-multipart
 pyotp
 gunicorn
 logzero
+websocket-client
