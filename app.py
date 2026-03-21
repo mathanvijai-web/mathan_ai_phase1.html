@@ -890,10 +890,10 @@ INDEX_CFG = {
 
 # ── ANGEL ONE STATE ─────────────────────────────────────────────────
 ANGEL = {
-    "api_key":     "",
-    "client_id":   "",
-    "pin":         "",
-    "totp_secret": "",
+    "api_key":     "jYAKgdt3",
+    "client_id":   "V542909",
+    "pin":         "1818",
+    "totp_secret": "KJ4MRMUWNTFTCUALRBH5ALKA7A",
     "connected":   False,
     "jwt_token":   "",
     "feed_token":  "",
@@ -1958,6 +1958,10 @@ if __name__ == "__main__":
         _fetch_yahoo_spot()
         _fetch_vix()
         _fetch_gift()
+
+    # Always start Yahoo for VIX+GIFT regardless
+    threading.Thread(target=_fetch_vix, daemon=True).start()
+    threading.Thread(target=_fetch_gift, daemon=True).start()
 
     threading.Thread(target=push_loop, daemon=True).start()
     threading.Thread(target=poll_loop, daemon=True).start()
