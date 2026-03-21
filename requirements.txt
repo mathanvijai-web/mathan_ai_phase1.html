@@ -1,5 +1,6 @@
 flask==3.0.3
 requests==2.32.3
 pyotp==2.9.0
-smartapi-python==1.5.5
+smartapi-python
 websocket-client==1.8.0
+logzero
