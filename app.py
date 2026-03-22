@@ -30,6 +30,22 @@ BRAIN = {
     "confidence": "LOW", "reasons": [], "trap": False,
 }
 SYS = {"count": 0, "error": None, "index": "NIFTY", "angel_ok": False}
+
+AGENTS = {
+    "l1":  {"name":"OI Analyst",     "signal":None,"detail":"","weight":1.5},
+    "l2":  {"name":"Price Action",   "signal":None,"detail":"","weight":1.5},
+    "l3":  {"name":"VIX Monitor",    "signal":None,"detail":"","weight":1.5},
+    "l4":  {"name":"GIFT Tracker",   "signal":None,"detail":"","weight":1.0},
+    "l5":  {"name":"CE Premium",     "signal":None,"detail":"","weight":1.0},
+    "l6":  {"name":"PE Premium",     "signal":None,"detail":"","weight":1.0},
+    "l7":  {"name":"Session Clock",  "signal":None,"detail":"","weight":0.8},
+    "l8":  {"name":"Expiry Watcher", "signal":None,"detail":"","weight":0.8},
+    "l9":  {"name":"Gap Detector",   "signal":None,"detail":"","weight":1.0},
+    "l10": {"name":"PCR Engine",     "signal":None,"detail":"","weight":1.2},
+    "l11": {"name":"Trap Detector",  "signal":None,"detail":"","weight":1.5},
+    "l12": {"name":"Risk Control",   "signal":None,"detail":"","weight":1.2},
+    "l13": {"name":"Behaviour AI",   "signal":None,"detail":"","weight":2.0},
+}
 LOCK = threading.Lock()
 
 INDEX_CFG = {
@@ -161,66 +177,159 @@ def fetch_yahoo():
 
 def compute_brain():
     with LOCK:
-        pcr = M["pcr"]; vix = M["vix"]; spot = M["spot"]
-        atm = M["atm"]; gd = M["gift_diff"]
-        ce = M["ce_prem"]; pe = M["pe_prem"]
-        sup = M["support"]; res = M["resistance"]
-        exp = M["exp_days"]
+        pcr=M["pcr"]; vix=M["vix"]; spot=M["spot"]
+        atm=M["atm"]; gd=M["gift_diff"]
+        ce=M["ce_prem"]; pe=M["pe_prem"]
+        ce_p=M.get("ce_prev"); pe_p=M.get("pe_prev")
+        sup=M["support"]; res=M["resistance"]
+        exp=M["exp_days"]; gap=M.get("gap")
 
-    bull = bear = 0.0; reasons = []
-    mins = ist_mins()
+    mins=ist_mins(); ag={}
 
-    # PCR
+    # L1 OI / PCR
     if pcr:
-        if pcr > 1.5:   bull += 1.5; reasons.append(f"PCR {pcr} STRONG BULL")
-        elif pcr > 1.2: bull += 1.0; reasons.append(f"PCR {pcr} BULLISH")
-        elif pcr < 0.6: bear += 1.5; reasons.append(f"PCR {pcr} STRONG BEAR")
-        elif pcr < 0.8: bear += 1.0; reasons.append(f"PCR {pcr} BEARISH")
+        if pcr>1.5:   ag["l1"]=("bull",f"PCR {pcr} STRONG BULL — Put writing heavy")
+        elif pcr>1.2: ag["l1"]=("bull",f"PCR {pcr} BULLISH")
+        elif pcr<0.6: ag["l1"]=("bear",f"PCR {pcr} STRONG BEAR — Call writing heavy")
+        elif pcr<0.8: ag["l1"]=("bear",f"PCR {pcr} BEARISH")
+        else:         ag["l1"]=("neut",f"PCR {pcr} NEUTRAL")
+    else: ag["l1"]=("neut","PCR N/A — Market closed / Loading")
 
-    # VIX
+    # L2 Price Action
+    if res and spot and spot>res:      ag["l2"]=("bull",f"Broke resistance {int(res)} — Breakout")
+    elif sup and spot and spot<sup:    ag["l2"]=("bear",f"Below support {int(sup)} — Breakdown")
+    elif spot and atm and spot>atm+50: ag["l2"]=("bull",f"Above ATM {atm} — Upward bias")
+    elif spot and atm and spot<atm-50: ag["l2"]=("bear",f"Below ATM {atm} — Downward bias")
+    elif spot and atm:                 ag["l2"]=("neut",f"At ATM {atm}")
+    else:                              ag["l2"]=("neut","Spot N/A — Pre market")
+
+    # L3 VIX
     if vix:
-        if vix > 22:   bear += 2.0; reasons.append(f"VIX {vix:.1f} EXTREME DANGER")
-        elif vix > 18: bear += 1.0; reasons.append(f"VIX {vix:.1f} HIGH FEAR")
-        elif vix < 13: bull += 1.0; reasons.append(f"VIX {vix:.1f} CALM")
+        if vix<12:   ag["l3"]=("bull",f"VIX {vix:.1f} — Very calm, safe to trade")
+        elif vix<15: ag["l3"]=("bull",f"VIX {vix:.1f} — Calm market")
+        elif vix<18: ag["l3"]=("neut",f"VIX {vix:.1f} — Caution zone")
+        elif vix<22: ag["l3"]=("bear",f"VIX {vix:.1f} — HIGH FEAR")
+        else:        ag["l3"]=("bear",f"VIX {vix:.1f} — EXTREME DANGER, avoid buying")
+    else: ag["l3"]=("neut","VIX N/A")
 
-    # Price vs ATM
-    if spot and atm:
-        if spot > atm + 50:   bull += 0.5; reasons.append("Above ATM — Bullish")
-        elif spot < atm - 50: bear += 0.5; reasons.append("Below ATM — Bearish")
+    # L4 GIFT
+    if gd is not None:
+        if gd>150:    ag["l4"]=("bull",f"GIFT +{round(gd)} — Strong gap up tomorrow")
+        elif gd>60:   ag["l4"]=("bull",f"GIFT +{round(gd)} — Mild gap up")
+        elif gd<-150: ag["l4"]=("bear",f"GIFT {round(gd)} — Strong gap down")
+        elif gd<-60:  ag["l4"]=("bear",f"GIFT {round(gd)} — Mild gap down")
+        else:         ag["l4"]=("neut",f"GIFT ±{round(abs(gd))} — Flat open")
+    else: ag["l4"]=("neut","GIFT N/A")
 
-    # GIFT
-    if gd:
-        if gd > 100:    bull += 0.8; reasons.append(f"GIFT +{round(gd)} Gap Up")
-        elif gd < -100: bear += 0.8; reasons.append(f"GIFT {round(gd)} Gap Down")
+    # L5 CE Premium
+    if ce:
+        chg=(ce-ce_p) if ce_p else 0
+        if chg>5:    ag["l5"]=("bull",f"CE ₹{ce:.0f} +{chg:.0f} rising — Buyers active")
+        elif chg<-5: ag["l5"]=("bear",f"CE ₹{ce:.0f} {chg:.0f} falling — CE sold")
+        else:        ag["l5"]=("neut",f"CE ₹{ce:.0f} stable")
+    else: ag["l5"]=("neut","CE N/A — Market closed")
 
-    # Session
-    if 570 <= mins <= 615:   bull += 1.0; reasons.append("OPEN HOUR — High momentum")
-    elif 615 <= mins <= 780: bull += 0.5; reasons.append("Morning session")
+    # L6 PE Premium
+    if pe:
+        chg=(pe-pe_p) if pe_p else 0
+        if chg>5:    ag["l6"]=("bear",f"PE ₹{pe:.0f} +{chg:.0f} rising — Bears active")
+        elif chg<-5: ag["l6"]=("bull",f"PE ₹{pe:.0f} {chg:.0f} falling — PE sold")
+        else:        ag["l6"]=("neut",f"PE ₹{pe:.0f} stable")
+    else: ag["l6"]=("neut","PE N/A — Market closed")
 
-    # Expiry
-    if exp == 0: reasons.append("EXPIRY DAY — Theta max")
+    # L7 Session Clock
+    if mins<555:   ag["l7"]=("neut","Pre-market — Wait for 9:15")
+    elif mins<600: ag["l7"]=("bull","OPEN HOUR 9:15 — High volatility entry")
+    elif mins<660: ag["l7"]=("bull","9:15–11:00 — Best entry window")
+    elif mins<780: ag["l7"]=("neut","11:00–1:00 — Mid session")
+    elif mins<870: ag["l7"]=("neut","1:00–2:30 — Afternoon consolidation")
+    elif mins<930: ag["l7"]=("neut","2:30–3:30 — EXPIRY WINDOW active")
+    else:          ag["l7"]=("neut","Post market — Closed")
 
-    # Trap
-    trap = False
-    if vix and vix > 20 and pcr and pcr > 1.2:
-        trap = True; reasons.append(f"⚠️ VIX {vix:.1f} + PCR {pcr} — Possible trap")
+    # L8 Expiry Watcher
+    if exp is not None:
+        if exp==0:   ag["l8"]=("bull","TODAY EXPIRY ⚡ — Max theta decay")
+        elif exp==1: ag["l8"]=("neut","PRE-EXPIRY tomorrow — Volatile")
+        elif exp<=3: ag["l8"]=("neut",f"{exp} days — Near expiry caution")
+        else:        ag["l8"]=("neut",f"{exp} days to expiry — Normal")
+    else: ag["l8"]=("neut","Expiry N/A")
 
-    tot = bull + bear or 1
-    bp = round(bull / tot * 100)
-    brp = 100 - bp
-    diff = abs(bull - bear)
-    conf = "HIGH" if diff >= 3 else "MEDIUM" if diff >= 1.5 else "LOW"
+    # L9 Gap Detector
+    if gap:
+        if gap>100:    ag["l9"]=("bull",f"Gap UP +{round(gap)} — Strong bullish open")
+        elif gap>40:   ag["l9"]=("bull",f"Gap UP +{round(gap)} — Mild")
+        elif gap<-100: ag["l9"]=("bear",f"Gap DOWN {round(gap)} — Strong bearish open")
+        elif gap<-40:  ag["l9"]=("bear",f"Gap DOWN {round(gap)} — Mild")
+        else:          ag["l9"]=("neut",f"Flat ±{round(abs(gap))} — No gap")
+    else: ag["l9"]=("neut","Gap N/A")
 
-    if trap:             sig = "WAIT"
-    elif bp >= 65:       sig = "BUY CE"
-    elif brp >= 65:      sig = "BUY PE"
-    else:                sig = "WAIT"
+    # L10 PCR Engine
+    if pcr:
+        if pcr>1.5:   ag["l10"]=("bull",f"PCR {pcr} — Strong bull confirmation")
+        elif pcr>1.2: ag["l10"]=("bull",f"PCR {pcr} — Bullish momentum")
+        elif pcr<0.6: ag["l10"]=("bear",f"PCR {pcr} — Strong bear momentum")
+        elif pcr<0.8: ag["l10"]=("bear",f"PCR {pcr} — Bearish bias")
+        else:         ag["l10"]=("neut",f"PCR {pcr} — Neutral zone")
+    else: ag["l10"]=("neut","PCR N/A")
+
+    # L11 Trap Detector
+    trap=False; trap_det=""
+    if pcr and spot and atm:
+        if pcr>1.3 and spot<atm-50:
+            trap=True; trap_det="PCR bullish but price below ATM — BULL TRAP?"
+        elif pcr<0.75 and spot>atm+50:
+            trap=True; trap_det="PCR bearish but price above ATM — BEAR TRAP?"
+    if vix and vix>20 and pcr and pcr>1.2:
+        trap=True; trap_det=f"High VIX {vix:.1f} + Bullish PCR — Manipulation risk!"
+    ag["l11"]=("neut",f"⚠️ {trap_det}") if trap else ("neut","No trap pattern detected")
+
+    # L12 Risk Control
+    if vix and vix>22:        ag["l12"]=("bear",f"VIX {vix:.1f} EXTREME — Avoid all trades!")
+    elif vix and vix>18:      ag["l12"]=("neut",f"VIX {vix:.1f} HIGH — 1 lot max, tight SL")
+    elif exp==0 and mins>=870:ag["l12"]=("neut","Last hour expiry — Zero decay risk")
+    else:                     ag["l12"]=("bull","Risk normal — Standard position OK")
+
+    # L13 Behaviour AI Master
+    b=sum(1 for v in ag.values() if v[0]=="bull")
+    r=sum(1 for v in ag.values() if v[0]=="bear")
+    total=b+r; ratio=(b-r)/total if total>0 else 0
+    if ratio>0.3 and (not vix or vix<18) and not trap:
+        ag["l13"]=("bull",f"Context BULL ({b}↑ {r}↓) — Go Long")
+    elif ratio<-0.3 and not trap:
+        ag["l13"]=("bear",f"Context BEAR ({b}↑ {r}↓) — Go Short")
+    else:
+        ag["l13"]=("neut",f"MIXED SIGNAL ({b}↑ {r}↓) — Wait for clarity")
+
+    # Update AGENTS
+    with LOCK:
+        for aid,(sig,det) in ag.items():
+            AGENTS[aid]["signal"]=sig
+            AGENTS[aid]["detail"]=det
+
+    # Weighted brain decision
+    bw=brw=0.0
+    reasons=[]
+    for aid,a in ag.items():
+        sig=a[0]; w=AGENTS[aid]["weight"]; det=a[1]
+        if sig=="bull":   bw+=w;  reasons.append(det)
+        elif sig=="bear": brw+=w; reasons.append(det)
+
+    tw=bw+brw or 1
+    bp=round(bw/tw*100); brp=100-bp
+    diff=abs(bw-brw)
+    conf="HIGH" if diff>=3 else "MEDIUM" if diff>=1.5 else "LOW"
+
+    if trap:        sig="WAIT"
+    elif bp>=65:    sig="BUY CE"
+    elif brp>=65:   sig="BUY PE"
+    else:           sig="WAIT"
 
     with LOCK:
         BRAIN.update({
-            "signal": sig, "bull_pct": bp, "bear_pct": brp,
-            "confidence": conf, "reasons": reasons[:6], "trap": trap
+            "signal":sig,"bull_pct":bp,"bear_pct":brp,
+            "confidence":conf,"reasons":reasons[:6],"trap":trap
         })
+        M["ce_prev"]=ce; M["pe_prev"]=pe
 
 def full_cycle():
     idx = SYS.get("index", "NIFTY")
@@ -337,6 +446,23 @@ body{background:var(--bg);color:var(--txt);font-family:'Rajdhani',sans-serif;pad
 .ref-btn{width:100%;padding:9px;border-radius:9px;cursor:pointer;
   border:1px solid rgba(41,182,246,.4);background:rgba(41,182,246,.05);
   color:var(--blu);font-family:'Orbitron';font-size:9px;letter-spacing:1px;margin-bottom:9px;}
+.ag-sect{font-family:'Share Tech Mono';font-size:7px;color:var(--dim);letter-spacing:2px;margin:8px 0 5px;}
+.ag-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:4px;}
+.agc{background:var(--bg3);border:1px solid var(--brd);border-radius:8px;padding:7px;position:relative;overflow:hidden;}
+.agc::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--brd);}
+.agc.bull::before{background:var(--grn);}
+.agc.bear::before{background:var(--red);}
+.agc.neut::before{background:var(--gold);}
+.ag-top{display:flex;justify-content:space-between;margin-bottom:2px;}
+.ag-id{font-family:'Orbitron';font-size:8px;color:var(--dim);}
+.ag-sig{font-family:'Share Tech Mono';font-size:9px;font-weight:700;}
+.ag-sig.bull{color:var(--grn);} .ag-sig.bear{color:var(--red);} .ag-sig.neut{color:var(--gold);} .ag-sig.none{color:var(--dim);}
+.ag-name{font-size:10px;font-weight:700;margin-bottom:1px;}
+.ag-val{font-family:'Share Tech Mono';font-size:8px;color:var(--dim);line-height:1.3;}
+.conf-bar{background:var(--bg3);border-radius:8px;padding:9px;margin-bottom:7px;}
+.conf-track{height:10px;border-radius:5px;background:rgba(255,255,255,.05);overflow:hidden;display:flex;margin-bottom:3px;}
+.conf-bull{height:100%;background:linear-gradient(90deg,#004d40,var(--grn));transition:width .7s;}
+.conf-bear{height:100%;background:linear-gradient(90deg,var(--red),#7f0000);transition:width .7s;}
 .wsbar{position:fixed;bottom:0;left:0;right:0;z-index:200;padding:4px 12px;
   font-family:'Share Tech Mono';font-size:9px;background:var(--bg2);
   border-top:1px solid var(--brd);display:flex;align-items:center;gap:6px;}
@@ -456,6 +582,55 @@ body{background:var(--bg);color:var(--txt);font-family:'Rajdhani',sans-serif;pad
   </div>
 </div>
 
+<!-- 13 AGENTS -->
+<div class="card">
+  <div class="ctitle">13 AGENT SIGNALS <span class="badge wait" id="ag-badge">WAITING</span></div>
+  
+  <div class="ag-sect">▸ OI &amp; PRICE</div>
+  <div class="ag-grid">
+    <div class="agc" id="card-l1"><div class="ag-top"><span class="ag-id">L1</span><span class="ag-sig none" id="sig-l1">—</span></div><div class="ag-name">OI Analyst</div><div class="ag-val" id="val-l1">—</div></div>
+    <div class="agc" id="card-l2"><div class="ag-top"><span class="ag-id">L2</span><span class="ag-sig none" id="sig-l2">—</span></div><div class="ag-name">Price Action</div><div class="ag-val" id="val-l2">—</div></div>
+    <div class="agc" id="card-l3"><div class="ag-top"><span class="ag-id">L3</span><span class="ag-sig none" id="sig-l3">—</span></div><div class="ag-name">VIX Monitor</div><div class="ag-val" id="val-l3">—</div></div>
+    <div class="agc" id="card-l4"><div class="ag-top"><span class="ag-id">L4</span><span class="ag-sig none" id="sig-l4">—</span></div><div class="ag-name">GIFT Tracker</div><div class="ag-val" id="val-l4">—</div></div>
+  </div>
+  
+  <div class="ag-sect">▸ PREMIUM &amp; SESSION</div>
+  <div class="ag-grid">
+    <div class="agc" id="card-l5"><div class="ag-top"><span class="ag-id">L5</span><span class="ag-sig none" id="sig-l5">—</span></div><div class="ag-name">CE Premium</div><div class="ag-val" id="val-l5">—</div></div>
+    <div class="agc" id="card-l6"><div class="ag-top"><span class="ag-id">L6</span><span class="ag-sig none" id="sig-l6">—</span></div><div class="ag-name">PE Premium</div><div class="ag-val" id="val-l6">—</div></div>
+    <div class="agc" id="card-l7"><div class="ag-top"><span class="ag-id">L7</span><span class="ag-sig none" id="sig-l7">—</span></div><div class="ag-name">Session Clock</div><div class="ag-val" id="val-l7">—</div></div>
+    <div class="agc" id="card-l8"><div class="ag-top"><span class="ag-id">L8</span><span class="ag-sig none" id="sig-l8">—</span></div><div class="ag-name">Expiry Watcher</div><div class="ag-val" id="val-l8">—</div></div>
+  </div>
+  
+  <div class="ag-sect">▸ BEHAVIOUR &amp; INTELLIGENCE</div>
+  <div class="ag-grid">
+    <div class="agc" id="card-l9"><div class="ag-top"><span class="ag-id">L9</span><span class="ag-sig none" id="sig-l9">—</span></div><div class="ag-name">Gap Detector</div><div class="ag-val" id="val-l9">—</div></div>
+    <div class="agc" id="card-l10"><div class="ag-top"><span class="ag-id">L10</span><span class="ag-sig none" id="sig-l10">—</span></div><div class="ag-name">PCR Engine</div><div class="ag-val" id="val-l10">—</div></div>
+    <div class="agc" id="card-l11" style="border-color:rgba(206,147,216,.2)"><div class="ag-top"><span class="ag-id">L11</span><span class="ag-sig none" id="sig-l11">—</span></div><div class="ag-name" style="color:var(--pur)">Trap Detector</div><div class="ag-val" id="val-l11">—</div></div>
+    <div class="agc" id="card-l12"><div class="ag-top"><span class="ag-id">L12</span><span class="ag-sig none" id="sig-l12">—</span></div><div class="ag-name">Risk Control</div><div class="ag-val" id="val-l12">—</div></div>
+  </div>
+  
+  <!-- L13 MASTER -->
+  <div class="agc" id="card-l13" style="grid-column:span 2;border-color:rgba(240,165,0,.3);margin-top:5px">
+    <div class="ag-top"><span class="ag-id" style="color:var(--gold)">L13 — MASTER</span><span class="ag-sig none" id="sig-l13">—</span></div>
+    <div class="ag-name" style="color:var(--gold)">Behaviour AI</div>
+    <div class="ag-val" id="val-l13">—</div>
+  </div>
+  
+  <!-- Confidence Bar -->
+  <div class="conf-bar" style="margin-top:8px">
+    <div style="display:flex;justify-content:space-between;font-family:'Share Tech Mono';font-size:8px;margin-bottom:5px;">
+      <span style="color:var(--grn)">BULL <span id="bp">50%</span></span>
+      <span style="color:var(--gold)" id="conf-mid">Confidence: —</span>
+      <span style="color:var(--red)">BEAR <span id="brp">50%</span></span>
+    </div>
+    <div class="conf-track">
+      <div class="conf-bull" id="conf-bull" style="width:50%"></div>
+      <div class="conf-bear" id="conf-bear" style="width:50%"></div>
+    </div>
+  </div>
+</div>
+
 <!-- BRAIN -->
 <div class="brain-box wait" id="brain-box">
   <div style="font-family:'Share Tech Mono';font-size:8px;color:var(--dim);letter-spacing:2px;margin-bottom:4px">MARKET BRAIN</div>
@@ -481,7 +656,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Rajdhani',sans-serif;pad
 </div>
 
 <script>
-let D={}, BR={}, SY={};
+let D={}, BR={}, SY={}, j_agents={};
 
 // ── HTTP POLLING ──────────────────────────────────────────────────
 async function poll(){
@@ -489,7 +664,7 @@ async function poll(){
     const r = await fetch('/state', {signal: AbortSignal.timeout(10000)});
     if(!r.ok) throw new Error('HTTP '+r.status);
     const j = await r.json();
-    D = j.market||{}; BR = j.brain||{}; SY = j.sys||{};
+    D = j.market||{}; BR = j.brain||{}; SY = j.sys||{}; j_agents = j.agents||{};
     setOnline();
     render();
   }catch(e){
@@ -508,7 +683,7 @@ function setOffline(msg){
   q('ws-txt').textContent=msg||'Connecting...';
 }
 
-function render(){
+function render(){ const j_agents_local=j_agents||{};
   // Status bar
   sdot('ok','Live #'+(SY.count||0)+' — '+(D.fetch_time||ist()));
   q('ws-cnt').textContent=D.source||'';
@@ -553,6 +728,29 @@ function render(){
   if(D.resistance) tv('resistance',D.resistance.toLocaleString('en-IN'),'var(--red)');
   if(D.ce_prem){ tv('cePrem','₹'+D.ce_prem.toFixed(0),'var(--grn)'); q('prem-src').className='badge live'; q('prem-src').textContent='🟢 REAL'; }
   if(D.pe_prem) tv('pePrem','₹'+D.pe_prem.toFixed(0),'var(--red)');
+
+  // Agents L1-L13
+  const AG=j_agents_local||{};
+  let hasData=false;
+  for(const [aid,a] of Object.entries(AG)){
+    const card=document.getElementById('card-'+aid);
+    const sigEl=document.getElementById('sig-'+aid);
+    const valEl=document.getElementById('val-'+aid);
+    if(!card) continue;
+    const d=a.signal||'none';
+    card.className='agc '+(d==='bull'||d==='bear'||d==='neut'?d:'');
+    if(sigEl){ sigEl.className='ag-sig '+d; sigEl.textContent=d==='bull'?'▲ BULL':d==='bear'?'▼ BEAR':d==='neut'?'◆ HOLD':'—'; }
+    if(valEl) valEl.textContent=a.detail||'—';
+    if(d!=='none') hasData=true;
+  }
+  document.getElementById('ag-badge').className='badge '+(hasData?'live':'wait');
+  document.getElementById('ag-badge').textContent=hasData?'● LIVE':'WAITING';
+  // Confidence
+  const bp_=BR.bull_pct||50, brp_=BR.bear_pct||50;
+  document.getElementById('conf-bull').style.width=bp_+'%';
+  document.getElementById('conf-bear').style.width=brp_+'%';
+  t('bp',bp_+'%'); t('brp',brp_+'%');
+  t('conf-mid','Confidence: '+(BR.confidence||'—'));
 
   // Brain
   const sig=BR.signal||'WAIT';
@@ -681,6 +879,7 @@ def state_route():
         return jsonify({
             "market": dict(M),
             "brain":  dict(BRAIN),
+            "agents": {k:dict(v) for k,v in AGENTS.items()},
             "sys":    {**dict(SYS), "angel_ok": ANGEL["connected"]},
         })
 
