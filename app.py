@@ -29,7 +29,7 @@ BRAIN = {
     "signal": "WAIT", "bull_pct": 50, "bear_pct": 50,
     "confidence": "LOW", "reasons": [], "trap": False,
 }
-SYS = {"count": 0, "error": None, "index": "NIFTY", "angel_ok": False}
+SYS = {"count": 0, "error": None, "index": "NIFTY", "angel_ok": False, "market_status": "CHECKING"}
 
 AGENTS = {
     "l1":  {"name":"OI Analyst",     "signal":None,"detail":"","weight":1.5},
@@ -133,25 +133,52 @@ def fetch_nse_oi(index="NIFTY"):
         return False
 
 def fetch_yahoo():
-    """Yahoo fallback for VIX + GIFT + spot."""
+    """Yahoo — works even on weekends/holidays!"""
     idx = SYS.get("index", "NIFTY")
     sym = {"NIFTY": "%5ENSEI", "SENSEX": "%5EBSESN"}[idx]
     hdrs = {"User-Agent": "Mozilla/5.0"}
+    
+    # Check if market is open
+    tz  = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    now = datetime.datetime.now(tz)
+    is_weekday = now.weekday() < 5   # Mon-Fri
+    market_open = is_weekday and (9*60+15 <= now.hour*60+now.minute <= 15*60+30)
+    
     try:
         r = requests.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
-            params={"interval": "1m", "range": "1d"},
+            params={"interval": "1d", "range": "5d"},  # 5 days — works on weekends!
             headers=hdrs, timeout=10)
         meta = r.json()["chart"]["result"][0]["meta"]
-        sp = meta.get("regularMarketPrice", 0)
+        # Use regularMarketPrice (last traded) — valid even after close
+        sp = meta.get("regularMarketPrice", 0) or meta.get("previousClose", 0)
         pv = meta.get("previousClose", sp)
         if sp:
             cfg = INDEX_CFG[idx]
+            atm = round(sp / cfg["step"]) * cfg["step"]
             with LOCK:
-                if not M["spot"]:
-                    M["spot"] = sp
-                    M["atm"] = round(sp / cfg["step"]) * cfg["step"]
-                    M["source"] = "Yahoo"
+                M["spot"]   = sp
+                M["atm"]    = atm
+                M["gap"]    = round(sp - pv, 2) if pv else 0
+                if not market_open:
+                    M["source"] = f"Yahoo PREV CLOSE ({now.strftime('%a')})"
+                else:
+                    M["source"] = "Yahoo LIVE"
+            print(f"[YAHOO] {idx}={sp} atm={atm} market_open={market_open}")
+    except Exception as e:
+        print(f"[YAHOO SPOT ERR] {e}")
+
+    # Both indices always fetch
+    try:
+        r2 = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5EBSESN",
+            params={"interval": "1d", "range": "5d"},
+            headers=hdrs, timeout=8)
+        sp2 = r2.json()["chart"]["result"][0]["meta"].get("regularMarketPrice",0)
+        if sp2:
+            with LOCK:
+                M["sensex"] = sp2
+                M["sensex_atm"] = round(sp2/100)*100
     except: pass
 
     try:
@@ -333,14 +360,56 @@ def compute_brain():
 
 def full_cycle():
     idx = SYS.get("index", "NIFTY")
-    # NSE Option Chain — FREE, no token needed!
-    ok = fetch_nse_oi_direct(idx)
-    if not ok:
-        ok = fetch_nse_oi(idx)   # alternate NSE method
-    # Always get VIX + GIFT from Yahoo
-    threading.Thread(target=fetch_yahoo, daemon=True).start()
-    if not ok:
-        with LOCK: SYS["error"] = "NSE fetch failed — retrying next cycle"
+    
+    # Check market status
+    tz  = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    now = datetime.datetime.now(tz)
+    is_weekday   = now.weekday() < 5
+    market_hours = is_weekday and (9*60+15 <= now.hour*60+now.minute <= 15*60+30)
+    
+    day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+    day = day_names[now.weekday()]
+    
+    if not is_weekday:
+        status = f"MARKET CLOSED — {day} (Weekend)"
+    elif not market_hours:
+        if now.hour*60+now.minute < 9*60+15:
+            status = f"PRE-MARKET — Opens 9:15 AM"
+        else:
+            status = f"MARKET CLOSED — 3:30 PM"
+    else:
+        status = "MARKET OPEN"
+    
+    with LOCK:
+        SYS["market_status"] = status
+        SYS["error"] = None if market_hours else status
+    
+    # Always fetch Yahoo (works weekends too!)
+    fetch_yahoo()
+    
+    # NSE OI only when market open
+    if market_hours:
+        ok = fetch_nse_oi_direct(idx)
+        if not ok:
+            ok = fetch_nse_oi(idx)
+        if not ok:
+            with LOCK: SYS["error"] = f"{status} — NSE OI unavailable"
+    else:
+        # Weekend/after hours — use last known or estimated OI
+        with LOCK:
+            if not M["call_oi"]:
+                # Estimate from spot
+                sp = M["spot"] or 23000
+                base = sp * 200
+                M["call_oi"] = int(base)
+                M["put_oi"]  = int(base * 1.05)
+                M["pcr"]     = 1.05
+                M["support"] = round(sp/50)*50 - 100
+                M["resistance"] = round(sp/50)*50 + 100
+                M["ce_prem"] = round(sp * 0.004)
+                M["pe_prem"] = round(sp * 0.0038)
+                M["source"]  = f"ESTIMATED ({status})"
+    
     compute_brain()
 
 def poll_loop():
@@ -685,7 +754,13 @@ function setOffline(msg){
 
 function render(){ const j_agents_local=j_agents||{};
   // Status bar
-  sdot('ok','Live #'+(SY.count||0)+' — '+(D.fetch_time||ist()));
+  const ms = SY.market_status||'';
+  if(ms && ms!=='MARKET OPEN'){
+    sdot('wait', ms);
+    q('live-badge').className='hlive on'; // still connected
+  } else {
+    sdot('ok','Live #'+(SY.count||0)+' — '+(D.fetch_time||ist()));
+  }
   q('ws-cnt').textContent=D.source||'';
 
   // Index
@@ -696,8 +771,13 @@ function render(){ const j_agents_local=j_agents||{};
   if(D.spot){
     const sv = D.spot.toFixed(0);
     const av = 'ATM: '+(D.atm||'—');
-    if(idx==='NIFTY'){ tv('nv',sv,'var(--grn)'); t('na',av); t('n-spot',sv); t('n-atm',av); }
-    else              { tv('sv',sv,'var(--grn)'); t('sa',av); t('s-spot',sv); t('s-atm',av); }
+    if(idx==='NIFTY'){
+      tv('nv',sv,'var(--grn)'); t('na',av); t('n-spot',sv); t('n-atm',av);
+      // Also show SENSEX if available
+      if(D.sensex){ tv('sv',D.sensex.toFixed(0),'var(--grn)'); t('sa','ATM: '+(D.sensex_atm||'—')); t('s-spot',D.sensex.toFixed(0)); t('s-atm','ATM: '+(D.sensex_atm||'—')); }
+    } else {
+      tv('sv',sv,'var(--grn)'); t('sa',av); t('s-spot',sv); t('s-atm',av);
+    }
   }
 
   if(D.vix){
@@ -880,7 +960,8 @@ def state_route():
             "market": dict(M),
             "brain":  dict(BRAIN),
             "agents": {k:dict(v) for k,v in AGENTS.items()},
-            "sys":    {**dict(SYS), "angel_ok": ANGEL["connected"]},
+            "sys":    {**dict(SYS), "angel_ok": ANGEL["connected"],
+                       "market_status": SYS.get("market_status","CHECKING")},
         })
 
 @app.route("/status")
